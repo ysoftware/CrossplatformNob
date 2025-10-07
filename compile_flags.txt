@@ -1,0 +1,7 @@
+-Wall
+-Wextra
+-Wuninitialized
+-pedantic
+-Wno-deprecated-declaration
+-isystem include
+-Ilib/SDL-3.2.16/include

@@ -1,0 +1,23 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.ysoftware.Player"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+  <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="34" />
+
+  <application android:label="Player" android:hasCode="true">
+    <activity android:name="com.ysoftware.MainActivity"
+              android:label="Player"
+              android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN"/>
+        <category android:name="android.intent.category.LAUNCHER"/>
+      </intent-filter>
+    </activity>
+
+    <activity android:name="org.libsdl.app.SDLActivity"
+        android:configChanges="keyboard|keyboardHidden|orientation|screenSize"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+        android:screenOrientation="portrait"/>
+  </application>
+</manifest>
