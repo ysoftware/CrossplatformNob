@@ -97,6 +97,13 @@ bool parse_config_from_args(int *argc, char ***argv, Config *config) {
         }
     }
 
+#ifndef __APPLE__
+    if (config->platform == IOS) {
+            nob_log(NOB_ERROR, "macOS is required to build an app for iOS.");
+            return false;
+    }
+#endif
+
     if (config->platform != PLATFORM_NATIVE) {
         if (config->force_rebuild) {
             nob_log(NOB_ERROR, "Force Rebuild flag makes no sense on iOS or Android, since this script always does a clean build on mobile platforms.");
