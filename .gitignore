@@ -12,7 +12,7 @@ build/*
 *.tmp
 .cache/
 compile_commands.json
-env/*
+env
 nob
 nob.old
 main.app

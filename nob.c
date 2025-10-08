@@ -5,39 +5,24 @@
 #include <time.h>
 #include <unistd.h>
 
-Nob_Cmd cmd = {0};
+typedef enum {
+    CLANG = 0,
+    GCC = 1,
+} Compiler;
 
-#define MACOS_TARGET      "11.0"
-#define SDL_VERSION       "3.2.16"
-#define BUILD_FOLDER "build"
-#define SRC          "src"
-#define EXE_NAME     "main.app"
-
-#define CONFIG_FILE_PATH BUILD_FOLDER"/.config"
-
-#define MONGOOSE_INCLUDE "-Ilib/mongoose-"MONGOOSE_VERSION
-#define MONGOOSE_LIB "lib/mongoose-"MONGOOSE_VERSION"/mongoose.c"
-
-#define VORBIS_LIB "include/stb_vorbis.c"
+typedef struct {
+    String_View apple_developer_name;
+    String_View ios_device_id;
+    String_View android_ndk_location;
+    String_View android_sdk_location;
+    String_View android_java_home;
+} Env;
 
 typedef enum {
     PLATFORM_NATIVE = 0,
     ANDROID,
     IOS,
 } Platform;
-
-char *config_platform_name(Platform platform) {
-    switch (platform) {
-        case PLATFORM_NATIVE: return "Native";
-        case ANDROID: return "Android";
-        case IOS: return "iOS";
-    }
-}
-
-typedef enum {
-    CLANG = 0,
-    GCC,
-} Compiler;
 
 typedef struct {
     Compiler compiler;
@@ -47,6 +32,32 @@ typedef struct {
     bool should_run;
     bool device;
 } Config;
+
+Config config = {0};
+Env env = {0};
+Nob_Cmd cmd = {0};
+
+#define BUILD_FOLDER "build"
+#define SRC          "src"
+#define EXE_NAME     "main.app"
+#define CONFIG_FILE_PATH BUILD_FOLDER"/.config"
+
+#define MACOS_TARGET      "11.0"
+
+#define ANDROID_TOOLS "34.0.0"
+#define ANDROID_API 34 // 34 seems to be minimal requirement of sdl
+#define ANDROID_ABI "arm64-v8a"
+
+// we keep this file between builds, since build/android folder is removed
+#define ANDROID_KEYSTORE_FILE BUILD_FOLDER"/keystore_android.keystore"
+
+char *config_platform_name(Platform platform) {
+    switch (platform) {
+        case PLATFORM_NATIVE: return "Native";
+        case ANDROID: return "Android";
+        case IOS: return "iOS";
+    }
+}
 
 void dump_config_to_file(const char *path, Config config) {
     Nob_String_Builder sb = {0};
@@ -70,6 +81,39 @@ unsigned long long get_timestamp_usec(void) {
     struct timespec time;
     clock_gettime(CLOCK_REALTIME, &time);
     return time.tv_sec * 1000000L + time.tv_nsec / 1000;
+}
+
+bool parse_environment(void) {
+    Nob_String_Builder sb = {0};
+    if (!nob_read_entire_file("env", &sb)) return true; // in case we don't care
+
+    String_View sv = sv_from_parts(sb.items, sb.count);
+    while (sv.count > 0) {
+        String_View line = sv_chop_by_delim(&sv, '\n');
+
+        if (sv_starts_with(line, sv_from_cstr("#"))) continue;
+        if (line.count == 0) continue;
+
+        String_View name = sv_chop_by_delim(&line, '=');
+        if (name.count == 0) continue;
+
+        if (sv_eq(name, sv_from_cstr("APPLE_DEVELOPER_NAME"))) {
+            env.apple_developer_name = line;
+        } else if (sv_eq(name, sv_from_cstr("IOS_DEVICE_ID"))) {
+            env.ios_device_id = line;
+        } else if (sv_eq(name, sv_from_cstr("ANDROID_NDK_LOCATION"))) {
+            env.android_ndk_location = line;
+        } else if (sv_eq(name, sv_from_cstr("ANDROID_SDK_LOCATION"))) {
+            env.android_sdk_location = line;
+        } else if (sv_eq(name, sv_from_cstr("ANDROID_JAVA_HOME"))) {
+            env.android_java_home = line;
+        } else {
+            nob_log(NOB_ERROR, "Unexpected variable name '"SV_Fmt"'", SV_Arg(name));
+            return false;
+        }
+    }
+
+    return true;
 }
 
 bool parse_config_from_args(int *argc, char ***argv, Config *config) {
@@ -130,9 +174,7 @@ bool load_config_from_file(const char *path, Config *config) {
     }
 
     Nob_String_Builder sb = {0};
-    if (!nob_read_entire_file(path, &sb)) {
-        return false;
-    }
+    if (!nob_read_entire_file(path, &sb)) return false;
 
     Nob_String_View content = sv_from_parts(sb.items, sb.count);
     while (true) {
@@ -181,7 +223,6 @@ void append_cmake_build_flags(Nob_Cmd *cmd) {
     cmd_append(cmd, temp_sprintf("-j%ld", jobs));
 }
 
-#define ANDROID_KEYSTORE_FILE BUILD_FOLDER"/keystore_android.keystore"
 bool create_android_keystore(void) {
     if (!file_exists(ANDROID_KEYSTORE_FILE)) {
         cmd_append(&cmd, "keytool");
@@ -202,6 +243,7 @@ bool create_android_keystore(void) {
 
 // Building frameworks
 
+#define SDL_VERSION "3.2.16"
 #define SDL_PATH "lib/SDL-"SDL_VERSION
 #define SDL_INCLUDE "-Ilib/SDL-"SDL_VERSION"/include"
 #define SDL_FILE BUILD_FOLDER"/libsdl3_native.a"
@@ -238,10 +280,6 @@ error:
 }
 
 #define ANDROID_APK_FOLDER ANDROID_BUILD"/apk"
-#define ANDROID_TOOLS "34.0.0"
-#define ANDROID_API 34 // 34 seems to be minimal requirement of sdl
-#define ANDROID_ABI "arm64-v8a"
-
 #define SDL_ANDROID_FILE BUILD_FOLDER"/libsdl3_android.so"
 bool build_sdl_android(void) {
     const char *current_dir = get_current_dir_temp();
@@ -253,12 +291,10 @@ bool build_sdl_android(void) {
         if (!cmd_run(&cmd)) goto error;
 
         // TODO: someday try to build it statically for android too
-        const char *ndk = getenv("ANDROID_NDK");
-        const char *sdk = getenv("ANDROID_SDK");
-        if (!ndk) { nob_log(NOB_ERROR, "env ANDROID_NDK not set"); return false; }
-        if (!sdk) { nob_log(NOB_ERROR, "env ANDROID_SDK not set"); return false; }
+        if (env.android_ndk_location.count == 0) { nob_log(NOB_ERROR, "env ANDROID_NDK_LOCATION not set"); return 1; }
+        if (env.android_sdk_location.count == 0) { nob_log(NOB_ERROR, "env ANDROID_SDK_LOCATION not set"); return 1; }
 
-        char *ndk_arg = temp_sprintf("-DCMAKE_TOOLCHAIN_FILE=%s/build/cmake/android.toolchain.cmake", ndk);
+        char *ndk_arg = temp_sprintf("-DCMAKE_TOOLCHAIN_FILE="SV_Fmt"/build/cmake/android.toolchain.cmake", SV_Arg(env.android_ndk_location));
         char *api_arg = temp_sprintf("-DANDROID_PLATFORM=%d", ANDROID_API);
         char *abi_arg = temp_sprintf("-DANDROID_ABI=%s", ANDROID_ABI);
 
@@ -378,114 +414,97 @@ int compare_paths(const void* a, const void* b) {
 
 // Compiler/Linker Flags
 
-void append_frameworks(Nob_Cmd *cmd, Config config) {
+void append_frameworks(void) {
 #ifdef __APPLE__
     if (config.platform == IOS) {
-        cmd_append(cmd, "-framework", "CoreBluetooth");
-        cmd_append(cmd, "-framework", "CoreMotion");
-        cmd_append(cmd, "-framework", "UIKit");
-        cmd_append(cmd, "-framework", "OpenGLES");
-        cmd_append(cmd, "-framework", "Foundation");
+        cmd_append(&cmd, "-framework", "CoreBluetooth");
+        cmd_append(&cmd, "-framework", "CoreMotion");
+        cmd_append(&cmd, "-framework", "UIKit");
+        cmd_append(&cmd, "-framework", "OpenGLES");
+        cmd_append(&cmd, "-framework", "Foundation");
     } else {
-        cmd_append(cmd, "-framework", "AppKit");
-        cmd_append(cmd, "-framework", "AudioUnit");
-        cmd_append(cmd, "-framework", "Carbon");
-        cmd_append(cmd, "-framework", "Cocoa");
-        cmd_append(cmd, "-framework", "ForceFeedback");
-        cmd_append(cmd, "-framework", "GLUT");
-        cmd_append(cmd, "-framework", "OpenGL");
+        cmd_append(&cmd, "-framework", "AppKit");
+        cmd_append(&cmd, "-framework", "AudioUnit");
+        cmd_append(&cmd, "-framework", "Carbon");
+        cmd_append(&cmd, "-framework", "Cocoa");
+        cmd_append(&cmd, "-framework", "ForceFeedback");
+        cmd_append(&cmd, "-framework", "GLUT");
+        cmd_append(&cmd, "-framework", "OpenGL");
     }
 
-    cmd_append(cmd, "-framework", "AudioToolbox");
-    cmd_append(cmd, "-framework", "AVFoundation");
-    cmd_append(cmd, "-framework", "CoreAudio");
-    cmd_append(cmd, "-framework", "CoreFoundation");
-    cmd_append(cmd, "-framework", "CoreGraphics");
-    cmd_append(cmd, "-framework", "CoreHaptics");
-    cmd_append(cmd, "-framework", "CoreMedia");
-    cmd_append(cmd, "-framework", "CoreServices");
-    cmd_append(cmd, "-framework", "CoreVideo");
-    cmd_append(cmd, "-framework", "GameController");
-    cmd_append(cmd, "-framework", "IOKit");
-    cmd_append(cmd, "-framework", "Metal");
-    cmd_append(cmd, "-framework", "QuartzCore");
-    cmd_append(cmd, "-framework", "Security");
-    cmd_append(cmd, "-framework", "SystemConfiguration");
-    cmd_append(cmd, "-framework", "UniformTypeIdentifiers");
-    cmd_append(cmd, "-L/opt/homebrew/lib", "-lbz2", "-lz");
+    cmd_append(&cmd, "-framework", "AudioToolbox");
+    cmd_append(&cmd, "-framework", "AVFoundation");
+    cmd_append(&cmd, "-framework", "CoreAudio");
+    cmd_append(&cmd, "-framework", "CoreFoundation");
+    cmd_append(&cmd, "-framework", "CoreGraphics");
+    cmd_append(&cmd, "-framework", "CoreHaptics");
+    cmd_append(&cmd, "-framework", "CoreMedia");
+    cmd_append(&cmd, "-framework", "CoreServices");
+    cmd_append(&cmd, "-framework", "CoreVideo");
+    cmd_append(&cmd, "-framework", "GameController");
+    cmd_append(&cmd, "-framework", "IOKit");
+    cmd_append(&cmd, "-framework", "Metal");
+    cmd_append(&cmd, "-framework", "QuartzCore");
+    cmd_append(&cmd, "-framework", "Security");
+    cmd_append(&cmd, "-framework", "SystemConfiguration");
+    cmd_append(&cmd, "-framework", "UniformTypeIdentifiers");
+    cmd_append(&cmd, "-L/opt/homebrew/lib", "-lbz2", "-lz");
 #else
-    (void)config;
-    cmd_append(cmd, "-lm", "-lpthread", "-lz", "-lpng", "-lbz2");
+    cmd_append(&cmd, "-lm", "-lpthread", "-lz", "-lpng", "-lbz2");
 #endif
 }
 
-void app_compiler(Nob_Cmd *cmd, Config *config) {
-    if (config->compiler == CLANG) {
-        cmd_append(cmd, "clang");
+void app_compiler(void) {
+    if (config.compiler == CLANG) {
+        cmd_append(&cmd, "clang");
     } else {
-        cmd_append(cmd, "gcc");
+        cmd_append(&cmd, "gcc");
     }
 }
 
-void app_default_cmd(Nob_Cmd *cmd, Config *config) {
-    cmd_append(cmd, "-Wall", "-Wextra", "-Wuninitialized", "-pedantic", "-march=native");
-
-#ifdef __APPLE__
-    cmd_append(cmd, "--std=c99"); // TODO: Enable this on Linux
-#endif
-
-    if (config->optimize) {
-        cmd_append(cmd, "-O3");
-    } else {
-        cmd_append(cmd, "-O0", "-g");
-        if (config->compiler == CLANG) cmd_append(cmd, "-fno-limit-debug-info");
+void app_default_cmd(void) {
+    if (config.platform == PLATFORM_NATIVE) {
+        cmd_append(&cmd, "-march=native");
     }
 
-    if (config->compiler == CLANG) cmd_append(cmd, "-fconstant-cfstrings");
-    cmd_append(cmd, "-Wno-deprecated-declarations");
+    if (config.optimize) {
+        cmd_append(&cmd, "-O3");
+    } else {
+        cmd_append(&cmd, "-O0", "-g");
+        if (config.compiler == CLANG) cmd_append(&cmd, "-fno-limit-debug-info");
+    }
+
+    if (config.compiler == CLANG) {
+        cmd_append(&cmd, "-fconstant-cfstrings");
+    }
 #ifdef __APPLE__
-    if (config->platform == PLATFORM_NATIVE) cmd_append(cmd, "-mmacosx-version-min="MACOS_TARGET);
+    if (config.platform == PLATFORM_NATIVE) cmd_append(&cmd, "-mmacosx-version-min="MACOS_TARGET);
 #endif
 }
 
-void append_renderer_libraries(Nob_Cmd *cmd, Config config) {
+void append_renderer_libraries(void) {
 #ifdef __linux__
     Nob_String_Builder sb = {0};
     sb_append_cstr(&sb, "-Wl,--whole-archive,");
     sb_append_cstr(&sb, SDL_FILE);
     sb_append_null(&sb);
-    cmd_append(cmd, sb.items);
-    cmd_append(cmd, "-Wl,--no-whole-archive");
+    cmd_append(&cmd, sb.items);
+    cmd_append(&cmd, "-Wl,--no-whole-archive");
 #else
-    cmd_append(cmd, temp_sprintf("-Wl,-force_load,%s", SDL_FILE));
+    cmd_append(&cmd, temp_sprintf("-Wl,-force_load,%s", SDL_FILE));
 #endif
 }
 
-void append_library_files(Nob_Cmd *cmd) {
-    
+void append_includes(void) {
+    cmd_append(&cmd, "-isystem", "include");
+    cmd_append(&cmd, SDL_INCLUDE);
 }
-
-void append_includes(Nob_Cmd *cmd) {
-    cmd_append(cmd, "-isystem", "include");
-    cmd_append(cmd, SDL_INCLUDE);
-}
-
-const char *library_lockfile_path = BUILD_FOLDER"/libplug.lock";
-#ifdef _WIN32
-const char *library_path = BUILD_FOLDER"\\libplug.dll";
-#elif __APPLE__
-const char *library_path = BUILD_FOLDER"/libplug.dylib";
-#else
-const char *library_path = BUILD_FOLDER"/libplug.so";
-#endif
 
 #define SDL_JAVA_SRC SDL_PATH"/android-project/app/src/main/java/org/libsdl/app"
 #define ANDROID_BUILD BUILD_FOLDER"/android"
-bool build_app_android(Config *config) {
-    const char *ndk = getenv("ANDROID_NDK");
-    const char *sdk = getenv("ANDROID_SDK");
-    if (!ndk) { nob_log(NOB_ERROR, "env ANDROID_NDK not set"); return 1; }
-    if (!sdk) { nob_log(NOB_ERROR, "env ANDROID_SDK not set"); return 1; }
+bool build_app_android(void) {
+    if (env.android_ndk_location.count == 0) { nob_log(NOB_ERROR, "env ANDROID_NDK_LOCATION not set"); return 1; }
+    if (env.android_sdk_location.count == 0) { nob_log(NOB_ERROR, "env ANDROID_SDK_LOCATION not set"); return 1; }
 
 #ifdef __linux__
     const char *host = "linux-x86_64";
@@ -497,22 +516,24 @@ bool build_app_android(Config *config) {
 
     // build app (as library)
 
-    char *compiler = temp_sprintf("%s/toolchains/llvm/prebuilt/%s/bin/aarch64-linux-android%d-clang", ndk, host, ANDROID_API);
+    // TODO: select correct arch
+    const char *target_arch = "aarch64-linux";
+    char *compiler = temp_sprintf(SV_Fmt"/toolchains/llvm/prebuilt/%s/bin/%s-android%d-clang",
+        SV_Arg(env.android_ndk_location), host, target_arch, ANDROID_API);
     char *api_arg = temp_sprintf("-DANDROID_PLATFORM=%d", ANDROID_API);
     char *sdl_arg = temp_sprintf("-L"BUILD_FOLDER);
 
     cmd_append(&cmd, compiler);
-    app_default_cmd(&cmd, config);
+    app_default_cmd();
     cmd_append(&cmd, "-shared");
     cmd_append(&cmd, "-fPIC");
     cmd_append(&cmd, api_arg);
     cmd_append(&cmd, SRC"/main.c");
-    append_includes(&cmd);
-    append_library_files(&cmd);
+    append_includes();
     cmd_append(&cmd, sdl_arg, "-lsdl3_android");
     cmd_append(&cmd, "-llog");
     cmd_append(&cmd, "-DRENDERER_SDL3");
-    cmd_append(&cmd, "-D__ANDROID__");
+    cmd_append(&cmd, "-DOS_ANDROID");
     cmd_append(&cmd, "-g", "-fno-omit-frame-pointer");
 
     cmd_append(&cmd, "-o");
@@ -520,8 +541,7 @@ bool build_app_android(Config *config) {
     if (!cmd_run(&cmd)) return false;
 
     // build java activity
-    const char *java_home = getenv("JAVA_HOME");
-    if (!java_home) {
+    if (env.android_java_home.count == 0) {
         nob_log(NOB_ERROR, "env JAVA_HOME not set.");
         nob_log(NOB_INFO, "JDK required. When installed, usually located:");
 #if __linux__
@@ -532,13 +552,13 @@ bool build_app_android(Config *config) {
         return false;
     }
 
-    const char *android_jar = temp_sprintf("%s/platforms/android-%d/android.jar", sdk, ANDROID_API);
+    const char *android_jar = temp_sprintf(SV_Fmt"/platforms/android-%d/android.jar", SV_Arg(env.android_sdk_location), ANDROID_API);
     if (!file_exists(android_jar)) {
         nob_log(NOB_ERROR, "Could not find android.jar. Possibly this android runtime is not installed?");
         nob_log(NOB_INFO, "Looked here: %s", android_jar);
 
         nob_log(NOB_INFO, "Available platforms:");
-        const char *platforms_folder = temp_sprintf("%s/platforms", sdk);
+        const char *platforms_folder = temp_sprintf(SV_Fmt"/platforms", SV_Arg(env.android_sdk_location));
         cmd_append(&cmd, "ls", platforms_folder);
         if (!cmd_run(&cmd)) return false;
 
@@ -563,12 +583,12 @@ bool build_app_android(Config *config) {
     cmd_append(&cmd, "jar", "cf", ANDROID_BUILD"/app.jar", "-C", ANDROID_BUILD"/java", ".");
     if (!cmd_run(&cmd)) return false;
 
-    const char *d8 = temp_sprintf("%s/build-tools/%s/d8", sdk, ANDROID_TOOLS);
-    cmd_append(&cmd, d8,  "--output", ANDROID_BUILD"/apk", ANDROID_BUILD"/app.jar"); // "--release",
+    const char *d8 = temp_sprintf(SV_Fmt"/build-tools/%s/d8", SV_Arg(env.android_sdk_location), ANDROID_TOOLS);
+    cmd_append(&cmd, d8,  "--output", ANDROID_BUILD"/apk", ANDROID_BUILD"/app.jar"); // TODO: at some point we will want to add "--release"
     if (!cmd_run(&cmd)) return false;
 
     // build unsigned apk using manifest
-    const char *aapt2 = temp_sprintf("%s/build-tools/%s/aapt2", sdk, ANDROID_TOOLS);
+    const char *aapt2 = temp_sprintf(SV_Fmt"/build-tools/%s/aapt2", SV_Arg(env.android_sdk_location), ANDROID_TOOLS);
     cmd_append(&cmd, aapt2);
     cmd_append(&cmd, "link");
     cmd_append(&cmd, "-o", ANDROID_BUILD"/app-unsigned.apk");
@@ -589,12 +609,12 @@ bool build_app_android(Config *config) {
     set_current_dir("../../..");
 
     // align .apk
-    const char *zipalign = temp_sprintf("%s/build-tools/%s/zipalign", sdk, ANDROID_TOOLS);
+    const char *zipalign = temp_sprintf(SV_Fmt"/build-tools/%s/zipalign", SV_Arg(env.android_sdk_location), ANDROID_TOOLS);
     cmd_append(&cmd, zipalign, "-v", "4", ANDROID_BUILD"/app-unsigned.apk", ANDROID_BUILD"/app-aligned.apk");
     if (!cmd_run(&cmd)) return false;
 
     // sign .apk
-    const char *apksigner = temp_sprintf("%s/build-tools/%s/apksigner", sdk, ANDROID_TOOLS);
+    const char *apksigner = temp_sprintf(SV_Fmt"/build-tools/%s/apksigner", SV_Arg(env.android_sdk_location), ANDROID_TOOLS);
     cmd_append(&cmd, apksigner);
     cmd_append(&cmd, "sign");
     cmd_append(&cmd, "--ks", ANDROID_KEYSTORE_FILE);
@@ -609,8 +629,8 @@ bool build_app_android(Config *config) {
 
 #define IOS_BUILD BUILD_FOLDER"/ios"
 #define IOS_APP_BUNDLE IOS_BUILD"/Player.app"
-bool build_app_ios(Config *config) {
-    char *platform = config->device ? "iphoneos" : "iphonesimulator";
+bool build_app_ios(void) {
+    char *platform = config.device ? "iphoneos" : "iphonesimulator";
     char *sdl_ios_file = temp_sprintf(BUILD_FOLDER"/libsdl3_%s.a", platform);
 
     cmd_append(&cmd, "xcrun", "--sdk", platform, "--show-sdk-path");
@@ -619,16 +639,15 @@ bool build_app_ios(Config *config) {
     // compile main.c
     char *arch = "arm64";
     cmd_append(&cmd, "clang");
-    app_default_cmd(&cmd, config);
+    app_default_cmd();
     cmd_append(&cmd, "-arch", arch);
     cmd_append(&cmd, "-isysroot", ios_sdk_path);
-    append_includes(&cmd);
-    append_library_files(&cmd);
-    cmd_append(&cmd, "-D__IOS__");
+    append_includes();
+    cmd_append(&cmd, "-DOS_IOS");
     cmd_append(&cmd, SRC"/main.c");
     cmd_append(&cmd, sdl_ios_file);
 
-    append_frameworks(&cmd, *config);
+    append_frameworks();
     cmd_append(&cmd, "-ObjC");
     cmd_append(&cmd, "-o", IOS_APP_BUNDLE"/Player");
     if (!cmd_run(&cmd)) return false;
@@ -644,7 +663,7 @@ bool build_app_ios(Config *config) {
     // copy things into app bundle
     if (!copy_file("ios/Info.plist", IOS_APP_BUNDLE"/Info.plist")) return false;
 
-    if (config->device) {
+    if (config.device) {
         if (!file_exists("env/profile.mobileprovision")) {
             nob_log(NOB_ERROR, "Appropriate profile file is required at env/profile.mobileprovision. This you can download from your apple developer account.");
             return false;
@@ -701,15 +720,14 @@ bool build_app_ios(Config *config) {
     return true;
 }
 
-bool build_app_native(Config *config) {
-    app_compiler(&cmd, config);
-    app_default_cmd(&cmd, config);
+bool build_app_native(void) {
+    app_compiler();
+    app_default_cmd();
     cmd_append(&cmd, SRC"/main.c");
-    append_library_files(&cmd);
-    append_includes(&cmd);
-    append_renderer_libraries(&cmd, *config);
+    append_includes();
+    append_renderer_libraries();
     cmd_append(&cmd, "-DRENDERER_SDL3");
-    append_frameworks(&cmd, *config);
+    append_frameworks();
     cmd_append(&cmd, "-o", EXE_NAME);
     if (!cmd_run(&cmd)) return false;
     return true;
@@ -732,6 +750,8 @@ bool build_clean_all(int argc, char **argv) {
 }
 
 bool build_app_config(Config config) {
+    unsigned long long start = get_timestamp_usec();
+
     bool config_did_change = false;
     if (!config.force_rebuild) {
         nob_log(NOB_INFO, "Previously built:");
@@ -755,6 +775,11 @@ bool build_app_config(Config config) {
     da_append(&app_inputs, "nob.c");
     recursively_collect_files(SRC, &app_inputs, allow_c_files);
 
+    printf("\n");
+    unsigned long long end = get_timestamp_usec();
+    nob_log(NOB_INFO, "Took %0.4fs.", (float)(end - start) / 1000000.0f);
+
+    // Run the app
     switch (config.platform) {
         case PLATFORM_NATIVE: {
             bool files_changed = needs_rebuild(EXE_NAME, app_inputs.items, app_inputs.count) == 1;
@@ -772,7 +797,7 @@ bool build_app_config(Config config) {
             if (!build_sdl(false)) return false;
 
             if (config_did_change || files_changed || config.force_rebuild) {
-                if (!build_app_native(&config)) return false;
+                if (!build_app_native()) return false;
             }
         } break;
         case ANDROID: {
@@ -788,7 +813,7 @@ bool build_app_config(Config config) {
 
             if (!create_android_keystore()) return false;
             if (!build_sdl_android()) return false;
-            if (!build_app_android(&config)) return false;
+            if (!build_app_android()) return false;
         } break;
         case IOS: {
             cmd_append(&cmd, "rm", "-r", IOS_BUILD);
@@ -799,80 +824,16 @@ bool build_app_config(Config config) {
             if (!mkdir_if_not_exists(IOS_APP_BUNDLE)) return false;
 
             if (!build_sdl_ios(&config)) return false;
-            if (!build_app_ios(&config)) return false;
+            if (!build_app_ios()) return false;
         } break;
     }
 
     dump_config_to_file(CONFIG_FILE_PATH, config);
 
-    if (config.should_run) {
-        switch (config.platform) {
-            case ANDROID: {
-                cmd_append(&cmd, "adb", "devices");
-                if (!cmd_run(&cmd)) return false;
-
-                cmd_append(&cmd, "adb", "install", "-r", ANDROID_BUILD"/app.apk");
-                if (!cmd_run(&cmd)) return false;
-
-                cmd_append(&cmd, "adb", "shell", "monkey", "-p", "com.ysoftware.Player", "1");
-                if (!cmd_run(&cmd)) return false;
-            } break;
-
-            case IOS: {
-                if (config.device) {
-                    if (!file_exists("env/device_id.txt")) {
-                        cmd_append(&cmd, "xcrun", "devicectl", "list", "devices");
-                        cmd_run(&cmd);
-
-                        nob_log(NOB_ERROR, "Please put your desired device id to run the app on from the list above into ios/device_id.txt");
-                        return false;
-                    }
-
-                    // get developer name from file
-                    String_Builder device_id_sb = {0};
-                    read_entire_file("env/device_id.txt", &device_id_sb);
-                    if (device_id_sb.count == 0) {
-                        cmd_append(&cmd, "xcrun", "devicectl", "list", "devices");
-                        cmd_run(&cmd);
-
-                        nob_log(NOB_ERROR, "Please put your desired device id to run the app on from the list above into ios/device_id.txt");
-                        return false;
-                    }
-
-                    device_id_sb.count -= 1;
-                    sb_append_null(&device_id_sb);
-                    nob_log(NOB_INFO, "Device id: '%s'", device_id_sb.items);
-
-                    cmd_append(&cmd, "xcrun", "devicectl", "device", "install");
-                    cmd_append(&cmd, "app", "build/ios/Player.app");
-                    cmd_append(&cmd, "--device", device_id_sb.items);
-                    cmd_run(&cmd);
-
-                    cmd_append(&cmd, "xcrun", "devicectl", "device");
-                    cmd_append(&cmd, "process", "launch");
-                    cmd_append(&cmd, "--device", device_id_sb.items);
-                    cmd_append(&cmd, "com.ysoftware.Player");
-                    cmd_run(&cmd);
-                } else {
-                    cmd_append(&cmd, "xcrun", "simctl", "terminate", "booted", "com.ysoftware.Player");
-                    cmd_run(&cmd);
-                    cmd_append(&cmd, "xcrun", "simctl", "install", "booted", (IOS_APP_BUNDLE));
-                    if (!cmd_run(&cmd)) return false;
-                    cmd_append(&cmd, "xcrun", "simctl", "launch", "booted", "com.ysoftware.Player");
-                    if (!cmd_run(&cmd)) return false;
-                }
-            } break;
-
-            default: {
-                cmd_append(&cmd, "./"EXE_NAME);
-                if (!cmd_run(&cmd)) return false;
-            } break;
-        }
-    }
     return true;
 }
 
-bool build_app_all_configs() {
+bool build_app_all_configs(void) {
     if (!build_app_config((Config) {
         .platform = PLATFORM_NATIVE,
         .force_rebuild = true,
@@ -899,8 +860,9 @@ bool build_app_all_configs() {
 int main(int argc, char **argv) {
     NOB_GO_REBUILD_URSELF(argc, argv);
 
+    if (!parse_environment()) return false;
+
     shift_args(&argc, &argv);
-    unsigned long long start = get_timestamp_usec();
 
     if (*(argv) != NULL && strcmp(*(argv), "clean") == 0) {
         if (!build_clean_all(argc, argv) != 0) return 1;
@@ -909,14 +871,9 @@ int main(int argc, char **argv) {
     } else if (*(argv) != NULL && strcmp(*(argv), "test_builds") == 0) {
         if (!build_app_all_configs()) return 1;
     } else {
-        Config config = {0};
         if (!parse_config_from_args(&argc, &argv, &config)) return false;
         if (!build_app_config(config)) return 1;
     }
-
-    printf("\n");
-    unsigned long long end = get_timestamp_usec();
-    nob_log(NOB_INFO, "Took %0.4fs.", (float)(end - start) / 1000000.0f);
 
     return 0;
 }

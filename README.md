@@ -24,9 +24,12 @@ Usage and build programme:
 2. iOS
 
 3. Android
-
+- Java 17
+- Android SDK
+- Android NDK
 
 TODO:
+- Think if I should move env to an env.h or directly into nob.c
 - Test on Windows
 - Test for Android Device
 - Put all env in 1 file 
