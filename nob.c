@@ -3,7 +3,10 @@
 #include "include/nob.h"
 
 #include <time.h>
+
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 typedef enum {
     CLANG = 0,
@@ -57,6 +60,7 @@ char *config_platform_name(Platform platform) {
         case ANDROID: return "Android";
         case IOS: return "iOS";
     }
+    return NULL;
 }
 
 void dump_config_to_file(const char *path, Config config) {
@@ -77,11 +81,22 @@ void log_config_string(Config config) {
             config.device);
 }
 
+#ifdef _WIN32
+#define EPOCH_DIFFERENCE 116444736000000000ULL
+unsigned long long get_timestamp_usec(void) {
+    FILETIME ft;
+    GetSystemTimePreciseAsFileTime(&ft);
+    ULONGLONG time100ns = (((ULONGLONG)ft.dwHighDateTime << 32) | ft.dwLowDateTime);
+    time100ns -= 116444736000000000ULL;
+    return (unsigned long long)(time100ns / 10);
+}
+#else
 unsigned long long get_timestamp_usec(void) {
     struct timespec time;
     clock_gettime(CLOCK_REALTIME, &time);
     return time.tv_sec * 1000000L + time.tv_nsec / 1000;
 }
+#endif
 
 bool parse_environment(void) {
     Nob_String_Builder sb = {0};
@@ -218,7 +233,11 @@ char *run_cmd_get_stdout(Nob_Cmd *cmd) {
 }
 
 void append_cmake_build_flags(Nob_Cmd *cmd) {
+#ifndef _WIN32
     long jobs = sysconf(_SC_NPROCESSORS_ONLN);
+#else
+    long jobs = 4;
+#endif
     if (jobs < 1) jobs = 1;
     cmd_append(cmd, temp_sprintf("-j%ld", jobs));
 }
@@ -268,8 +287,14 @@ bool build_sdl(bool force_rebuild) {
         append_cmake_build_flags(&cmd);
         if (!cmd_run(&cmd)) goto error;
 
+#ifdef _WIN32
+        const char *output_path = "Debug/SDL3-static.lib";
+#else
+        const char *output_path = "libSDL3.a";
+#endif
+
         set_current_dir("build"); // sdl's build folder
-        if (!copy_file("libSDL3.a", "../../../"SDL_FILE)) goto error;
+        if (!copy_file(output_path, "../../../"SDL_FILE)) goto error;
         set_current_dir(current_dir);
     }
     return true;
@@ -455,11 +480,15 @@ void append_frameworks(void) {
 }
 
 void app_compiler(void) {
+#ifdef _WIN32
+    cmd_append(&cmd, "cl");
+#else
     if (config.compiler == CLANG) {
         cmd_append(&cmd, "clang");
     } else {
         cmd_append(&cmd, "gcc");
     }
+#endif
 }
 
 void app_default_cmd(void) {
@@ -510,6 +539,8 @@ bool build_app_android(void) {
     const char *host = "linux-x86_64";
 #elif __APPLE__
     const char *host = "darwin-x86_64";
+#elif _WIN32
+    const char *host = "windows-x86_64";
 #else
 #  error "Unsupported host for Android build"
 #endif
