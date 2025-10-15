@@ -3,10 +3,25 @@
 #include "include/nob.h"
 
 #include <time.h>
-
 #ifndef _WIN32
 #include <unistd.h>
 #endif
+
+#define BUILD_FOLDER     "build"
+#define SRC              "src"
+#define EXE_NAME         "main.app"
+#define CONFIG_FILE_PATH BUILD_FOLDER"/.config"
+
+#define MACOS_TARGET  "11.0"
+#define ANDROID_TOOLS "34.0.0"
+#define ANDROID_API   34 // 34 seems to be minimal requirement of sdl
+#define ANDROID_ABI   "arm64-v8a"
+
+#define SDL_VERSION   "3.2.16"
+
+#define SDL_PATH "lib/SDL-"SDL_VERSION
+#define SDL_INCLUDE "-Ilib/SDL-"SDL_VERSION"/include"
+#define SDL_FILE BUILD_FOLDER"/libsdl3_native.a"
 
 typedef enum {
     CLANG = 0,
@@ -40,46 +55,7 @@ Config config = {0};
 Env env = {0};
 Nob_Cmd cmd = {0};
 
-#define BUILD_FOLDER "build"
-#define SRC          "src"
-#define EXE_NAME     "main.app"
-#define CONFIG_FILE_PATH BUILD_FOLDER"/.config"
-
-#define MACOS_TARGET      "11.0"
-
-#define ANDROID_TOOLS "34.0.0"
-#define ANDROID_API 34 // 34 seems to be minimal requirement of sdl
-#define ANDROID_ABI "arm64-v8a"
-
-// we keep this file between builds, since build/android folder is removed
-#define ANDROID_KEYSTORE_FILE BUILD_FOLDER"/keystore_android.keystore"
-
-char *config_platform_name(Platform platform) {
-    switch (platform) {
-        case PLATFORM_NATIVE: return "Native";
-        case ANDROID: return "Android";
-        case IOS: return "iOS";
-    }
-    return NULL;
-}
-
-void dump_config_to_file(const char *path, Config config) {
-    Nob_String_Builder sb = {0};
-    sb_append_cstr(&sb, temp_sprintf("compiler=%d\n", config.compiler));
-    sb_append_cstr(&sb, temp_sprintf("optimize=%d\n", config.optimize));
-    sb_append_cstr(&sb, temp_sprintf("platform=%d\n", config.platform));
-    sb_append_cstr(&sb, temp_sprintf("device=%d\n", config.device));
-    write_entire_file(path, sb.items, sb.count);
-    sb_free(sb);
-}
-
-void log_config_string(Config config) {
-    nob_log(NOB_INFO, "Compiler: %s. Optimize=%d. Platform=%s. Device=%d.",
-            config.compiler == CLANG ? "clang": "gcc",
-            config.optimize,
-            config_platform_name(config.platform),
-            config.device);
-}
+// Utils ------------------------------
 
 #ifdef _WIN32
 #define EPOCH_DIFFERENCE 116444736000000000ULL
@@ -98,37 +74,117 @@ unsigned long long get_timestamp_usec(void) {
 }
 #endif
 
-bool parse_environment(void) {
-    Nob_String_Builder sb = {0};
-    if (!nob_read_entire_file("env", &sb)) return true; // in case we don't care
+char *uppercase_string(char *s) {
+    char *copy = temp_strdup(s);
+    char *p = copy;
+    while (*p) {
+        *p = toupper((unsigned char)*p);
+        p++;
+    }
+    return copy;
+}
 
-    String_View sv = sv_from_parts(sb.items, sb.count);
-    while (sv.count > 0) {
-        String_View line = sv_chop_by_delim(&sv, '\n');
+char *run_cmd_get_stdout(void) {
+    String_Builder sb = {0};
+    Nob_Fd temp_file = fd_open_for_write(BUILD_FOLDER"/temp.txt");
+    if (!cmd_run(&cmd, .fdout = &temp_file)) return NULL;
+    read_entire_file(BUILD_FOLDER"/temp.txt", &sb);
+    sb.count -= 1; // maybe bad hack? remove \n at the end
+    nob_sb_append_null(&sb);
+    return sb.items;
+}
 
-        if (sv_starts_with(line, sv_from_cstr("#"))) continue;
-        if (line.count == 0) continue;
+#define ANDROID_KEYSTORE_FILE BUILD_FOLDER"/keystore_android.keystore"
+bool create_android_keystore(void) {
+    if (!file_exists(ANDROID_KEYSTORE_FILE)) {
+        cmd_append(&cmd, "keytool");
+        cmd_append(&cmd, "-genkeypair");
+        cmd_append(&cmd, "-alias", "debug");
+        cmd_append(&cmd, "-keyalg", "RSA");
+        cmd_append(&cmd, "-keysize", "2048");
+        cmd_append(&cmd, "-validity", "10000");
+        cmd_append(&cmd, "-keystore", ANDROID_KEYSTORE_FILE);
+        cmd_append(&cmd, "-storepass", "android");
+        cmd_append(&cmd, "-keypass", "android");
+        cmd_append(&cmd, "-dname", "CN=Debug,O=SDLApp,C=US");
 
-        String_View name = sv_chop_by_delim(&line, '=');
-        if (name.count == 0) continue;
+        if (!cmd_run(&cmd)) return false;
+    }
+    return true;
+}
 
-        if (sv_eq(name, sv_from_cstr("APPLE_DEVELOPER_NAME"))) {
-            env.apple_developer_name = line;
-        } else if (sv_eq(name, sv_from_cstr("IOS_DEVICE_ID"))) {
-            env.ios_device_id = line;
-        } else if (sv_eq(name, sv_from_cstr("ANDROID_NDK_LOCATION"))) {
-            env.android_ndk_location = line;
-        } else if (sv_eq(name, sv_from_cstr("ANDROID_SDK_LOCATION"))) {
-            env.android_sdk_location = line;
-        } else if (sv_eq(name, sv_from_cstr("ANDROID_JAVA_HOME"))) {
-            env.android_java_home = line;
-        } else {
-            nob_log(NOB_ERROR, "Unexpected variable name '"SV_Fmt"'", SV_Arg(name));
-            return false;
+// Collecting files -------------------
+
+bool allow_svg_files(const char *path) {
+    size_t len = strlen(path);
+    return len > 2 && strcmp(path + len - 4, ".svg") == 0;
+}
+
+bool allow_h_files(const char *path) {
+    size_t len = strlen(path);
+    return len > 2 && strcmp(path + len - 2, ".h") == 0;
+}
+
+bool allow_java_files(const char *path) {
+    size_t len = strlen(path);
+    return len > 5 && strcmp(path + len - 5, ".java") == 0;
+}
+
+bool allow_c_files(const char *path) {
+    size_t len = strlen(path);
+    return len > 2 && (
+        strcmp(path + len - 2, ".c") == 0 || strcmp(path + len - 2, ".h") == 0
+    );
+}
+
+bool allow_all_files(const char *path) { (void)path; return true; }
+void recursively_collect_files(const char *parent, Nob_File_Paths *out, bool (*filter_function) (const char *)) {
+    Nob_File_Paths entries = {0};
+    if (!nob_read_entire_dir(parent, &entries)) return;
+
+    for (size_t i = 0; i < entries.count; ++i) {
+        const char *sub = entries.items[i];
+        if (strcmp(sub, ".") == 0 || strcmp(sub, "..") == 0) continue;
+        char *path = temp_sprintf("%s/%s", parent, sub);
+        Nob_File_Type t = get_file_type(path);
+
+        if (t == NOB_FILE_DIRECTORY) {
+            recursively_collect_files(path, out, filter_function);
+        } else if (t == NOB_FILE_REGULAR) {
+            if (filter_function(path)) {
+                da_append(out, temp_strdup(path));
+            }
         }
     }
+    da_free(entries);
+}
 
-    return true;
+// Config -----------------------------
+
+char *config_platform_name(Platform platform) {
+    switch (platform) {
+        case PLATFORM_NATIVE: return "Native";
+        case ANDROID: return "Android";
+        case IOS: return "iOS";
+    }
+}
+
+void dump_config_to_file(const char *path, Config config) {
+    Nob_String_Builder sb = {0};
+    sb_append_cstr(&sb, temp_sprintf("compiler=%d\n", config.compiler));
+    sb_append_cstr(&sb, temp_sprintf("optimize=%d\n", config.optimize));
+    sb_append_cstr(&sb, temp_sprintf("platform=%d\n", config.platform));
+    sb_append_cstr(&sb, temp_sprintf("device=%d\n", config.device));
+    write_entire_file(path, sb.items, sb.count);
+    sb_free(sb);
+}
+
+void log_config_string(Config config) {
+    nob_log(NOB_INFO, "Compiler: %s. Optimize=%d. Platform=%s. Device=%d.",
+            config.compiler == CLANG ? "clang": "gcc",
+            config.optimize,
+            config_platform_name(config.platform),
+            config.device);
 }
 
 bool parse_config_from_args(int *argc, char ***argv, Config *config) {
@@ -212,25 +268,40 @@ bool load_config_from_file(const char *path, Config *config) {
     return true;
 }
 
-char *uppercase_string(char *s) {
-    char *copy = temp_strdup(s);
-    char *p = copy;
-    while (*p) {
-        *p = toupper((unsigned char)*p);
-        p++;
+bool parse_environment(void) {
+    Nob_String_Builder sb = {0};
+    if (!nob_read_entire_file("env", &sb)) return true; // in case we don't care
+
+    String_View sv = sv_from_parts(sb.items, sb.count);
+    while (sv.count > 0) {
+        String_View line = sv_chop_by_delim(&sv, '\n');
+
+        if (sv_starts_with(line, sv_from_cstr("#"))) continue;
+        if (line.count == 0) continue;
+
+        String_View name = sv_chop_by_delim(&line, '=');
+        if (name.count == 0) continue;
+
+        if (sv_eq(name, sv_from_cstr("APPLE_DEVELOPER_NAME"))) {
+            env.apple_developer_name = line;
+        } else if (sv_eq(name, sv_from_cstr("IOS_DEVICE_ID"))) {
+            env.ios_device_id = line;
+        } else if (sv_eq(name, sv_from_cstr("ANDROID_NDK_LOCATION"))) {
+            env.android_ndk_location = line;
+        } else if (sv_eq(name, sv_from_cstr("ANDROID_SDK_LOCATION"))) {
+            env.android_sdk_location = line;
+        } else if (sv_eq(name, sv_from_cstr("ANDROID_JAVA_HOME"))) {
+            env.android_java_home = line;
+        } else {
+            nob_log(NOB_ERROR, "Unexpected variable name '"SV_Fmt"'", SV_Arg(name));
+            return false;
+        }
     }
-    return copy;
+
+    return true;
 }
 
-char *run_cmd_get_stdout(Nob_Cmd *cmd) {
-    String_Builder sb = {0};
-    Nob_Fd temp_file = fd_open_for_write(BUILD_FOLDER"/temp.txt");
-    if (!cmd_run(cmd, .fdout = &temp_file)) return NULL;
-    read_entire_file(BUILD_FOLDER"/temp.txt", &sb);
-    sb.count -= 1; // maybe bad hack? remove \n at the end
-    nob_sb_append_null(&sb);
-    return sb.items;
-}
+// Compiler/Linker Flags --------------
 
 void append_cmake_build_flags(Nob_Cmd *cmd) {
 #ifndef _WIN32
@@ -242,30 +313,98 @@ void append_cmake_build_flags(Nob_Cmd *cmd) {
     cmd_append(cmd, temp_sprintf("-j%ld", jobs));
 }
 
-bool create_android_keystore(void) {
-    if (!file_exists(ANDROID_KEYSTORE_FILE)) {
-        cmd_append(&cmd, "keytool");
-        cmd_append(&cmd, "-genkeypair");
-        cmd_append(&cmd, "-alias", "debug");
-        cmd_append(&cmd, "-keyalg", "RSA");
-        cmd_append(&cmd, "-keysize", "2048");
-        cmd_append(&cmd, "-validity", "10000");
-        cmd_append(&cmd, "-keystore", ANDROID_KEYSTORE_FILE);
-        cmd_append(&cmd, "-storepass", "android");
-        cmd_append(&cmd, "-keypass", "android");
-        cmd_append(&cmd, "-dname", "CN=Debug,O=SDLApp,C=US");
-
-        if (!cmd_run(&cmd)) return false;
+void append_frameworks(void) {
+#ifdef __APPLE__
+    if (config.platform == IOS) {
+        cmd_append(&cmd, "-framework", "CoreBluetooth");
+        cmd_append(&cmd, "-framework", "CoreMotion");
+        cmd_append(&cmd, "-framework", "UIKit");
+        cmd_append(&cmd, "-framework", "OpenGLES");
+        cmd_append(&cmd, "-framework", "Foundation");
+    } else {
+        cmd_append(&cmd, "-framework", "AppKit");
+        cmd_append(&cmd, "-framework", "AudioUnit");
+        cmd_append(&cmd, "-framework", "Carbon");
+        cmd_append(&cmd, "-framework", "Cocoa");
+        cmd_append(&cmd, "-framework", "ForceFeedback");
+        cmd_append(&cmd, "-framework", "GLUT");
+        cmd_append(&cmd, "-framework", "OpenGL");
     }
-    return true;
+
+    cmd_append(&cmd, "-framework", "AudioToolbox");
+    cmd_append(&cmd, "-framework", "AVFoundation");
+    cmd_append(&cmd, "-framework", "CoreAudio");
+    cmd_append(&cmd, "-framework", "CoreFoundation");
+    cmd_append(&cmd, "-framework", "CoreGraphics");
+    cmd_append(&cmd, "-framework", "CoreHaptics");
+    cmd_append(&cmd, "-framework", "CoreMedia");
+    cmd_append(&cmd, "-framework", "CoreServices");
+    cmd_append(&cmd, "-framework", "CoreVideo");
+    cmd_append(&cmd, "-framework", "GameController");
+    cmd_append(&cmd, "-framework", "IOKit");
+    cmd_append(&cmd, "-framework", "Metal");
+    cmd_append(&cmd, "-framework", "QuartzCore");
+    cmd_append(&cmd, "-framework", "Security");
+    cmd_append(&cmd, "-framework", "SystemConfiguration");
+    cmd_append(&cmd, "-framework", "UniformTypeIdentifiers");
+    cmd_append(&cmd, "-L/opt/homebrew/lib", "-lbz2", "-lz");
+#else
+    cmd_append(&cmd, "-lm", "-lpthread", "-lz", "-lpng", "-lbz2");
+#endif
 }
 
-// Building frameworks
+void app_compiler(void) {
+#ifdef _WIN32
+    cmd_append(&cmd, "cl");
+#else
+    if (config.compiler == CLANG) {
+        cmd_append(&cmd, "clang");
+    } else {
+        cmd_append(&cmd, "gcc");
+    }
+#endif
+}
 
-#define SDL_VERSION "3.2.16"
-#define SDL_PATH "lib/SDL-"SDL_VERSION
-#define SDL_INCLUDE "-Ilib/SDL-"SDL_VERSION"/include"
-#define SDL_FILE BUILD_FOLDER"/libsdl3_native.a"
+void app_default_cmd(void) {
+    if (config.platform == PLATFORM_NATIVE) {
+        cmd_append(&cmd, "-march=native");
+    }
+
+    if (config.optimize) {
+        cmd_append(&cmd, "-O3");
+    } else {
+        cmd_append(&cmd, "-O0", "-g");
+        if (config.compiler == CLANG) cmd_append(&cmd, "-fno-limit-debug-info");
+    }
+
+    if (config.compiler == CLANG) {
+        cmd_append(&cmd, "-fconstant-cfstrings");
+    }
+#ifdef __APPLE__
+    if (config.platform == PLATFORM_NATIVE) cmd_append(&cmd, "-mmacosx-version-min="MACOS_TARGET);
+#endif
+}
+
+void append_renderer_libraries(void) {
+#ifdef __linux__
+    Nob_String_Builder sb = {0};
+    sb_append_cstr(&sb, "-Wl,--whole-archive,");
+    sb_append_cstr(&sb, SDL_FILE);
+    sb_append_null(&sb);
+    cmd_append(&cmd, sb.items);
+    cmd_append(&cmd, "-Wl,--no-whole-archive");
+#else
+    cmd_append(&cmd, temp_sprintf("-Wl,-force_load,%s", SDL_FILE));
+#endif
+}
+
+void append_includes(void) {
+    cmd_append(&cmd, "-isystem", "include");
+    cmd_append(&cmd, SDL_INCLUDE);
+}
+
+// Building large dependencies --------
+
 bool build_sdl(bool force_rebuild) {
     const char *current_dir = get_current_dir_temp();
 
@@ -387,146 +526,6 @@ bool build_sdl_ios(Config *config) {
 error:
     set_current_dir(current_dir);
     return false;
-}
-
-// Searching for files
-
-bool allow_h_files(const char *path) {
-    size_t len = strlen(path);
-    return len > 2 && strcmp(path + len - 2, ".h") == 0;
-}
-
-bool allow_java_files(const char *path) {
-    size_t len = strlen(path);
-    return len > 5 && strcmp(path + len - 5, ".java") == 0;
-}
-
-bool allow_c_files(const char *path) {
-    size_t len = strlen(path);
-    return len > 2 && (strcmp(path + len - 2, ".c") == 0 || strcmp(path + len - 2, ".h") == 0);
-}
-
-bool allow_all_files(const char *path) {
-    return true;
-}
-
-void recursively_collect_files(const char *parent, Nob_File_Paths *out, bool (*filter_function) (const char *)) {
-    Nob_File_Paths entries = {0};
-    if (!nob_read_entire_dir(parent, &entries)) return;
-
-    for (size_t i = 0; i < entries.count; ++i) {
-        const char *sub = entries.items[i];
-        if (strcmp(sub, ".") == 0 || strcmp(sub, "..") == 0) continue;
-        char *path = temp_sprintf("%s/%s", parent, sub);
-        Nob_File_Type t = get_file_type(path);
-
-        if (t == NOB_FILE_DIRECTORY) {
-            recursively_collect_files(path, out, filter_function);
-        } else if (t == NOB_FILE_REGULAR) {
-            if (filter_function(path)) {
-                da_append(out, temp_strdup(path));
-            }
-        }
-    }
-    da_free(entries);
-}
-
-int compare_paths(const void* a, const void* b) {
-    const char* sa = *(const char**)a;
-    const char* sb = *(const char**)b;
-    return strcmp(sa, sb);
-}
-
-// Compiler/Linker Flags
-
-void append_frameworks(void) {
-#ifdef __APPLE__
-    if (config.platform == IOS) {
-        cmd_append(&cmd, "-framework", "CoreBluetooth");
-        cmd_append(&cmd, "-framework", "CoreMotion");
-        cmd_append(&cmd, "-framework", "UIKit");
-        cmd_append(&cmd, "-framework", "OpenGLES");
-        cmd_append(&cmd, "-framework", "Foundation");
-    } else {
-        cmd_append(&cmd, "-framework", "AppKit");
-        cmd_append(&cmd, "-framework", "AudioUnit");
-        cmd_append(&cmd, "-framework", "Carbon");
-        cmd_append(&cmd, "-framework", "Cocoa");
-        cmd_append(&cmd, "-framework", "ForceFeedback");
-        cmd_append(&cmd, "-framework", "GLUT");
-        cmd_append(&cmd, "-framework", "OpenGL");
-    }
-
-    cmd_append(&cmd, "-framework", "AudioToolbox");
-    cmd_append(&cmd, "-framework", "AVFoundation");
-    cmd_append(&cmd, "-framework", "CoreAudio");
-    cmd_append(&cmd, "-framework", "CoreFoundation");
-    cmd_append(&cmd, "-framework", "CoreGraphics");
-    cmd_append(&cmd, "-framework", "CoreHaptics");
-    cmd_append(&cmd, "-framework", "CoreMedia");
-    cmd_append(&cmd, "-framework", "CoreServices");
-    cmd_append(&cmd, "-framework", "CoreVideo");
-    cmd_append(&cmd, "-framework", "GameController");
-    cmd_append(&cmd, "-framework", "IOKit");
-    cmd_append(&cmd, "-framework", "Metal");
-    cmd_append(&cmd, "-framework", "QuartzCore");
-    cmd_append(&cmd, "-framework", "Security");
-    cmd_append(&cmd, "-framework", "SystemConfiguration");
-    cmd_append(&cmd, "-framework", "UniformTypeIdentifiers");
-    cmd_append(&cmd, "-L/opt/homebrew/lib", "-lbz2", "-lz");
-#else
-    cmd_append(&cmd, "-lm", "-lpthread", "-lz", "-lpng", "-lbz2");
-#endif
-}
-
-void app_compiler(void) {
-#ifdef _WIN32
-    cmd_append(&cmd, "cl");
-#else
-    if (config.compiler == CLANG) {
-        cmd_append(&cmd, "clang");
-    } else {
-        cmd_append(&cmd, "gcc");
-    }
-#endif
-}
-
-void app_default_cmd(void) {
-    if (config.platform == PLATFORM_NATIVE) {
-        cmd_append(&cmd, "-march=native");
-    }
-
-    if (config.optimize) {
-        cmd_append(&cmd, "-O3");
-    } else {
-        cmd_append(&cmd, "-O0", "-g");
-        if (config.compiler == CLANG) cmd_append(&cmd, "-fno-limit-debug-info");
-    }
-
-    if (config.compiler == CLANG) {
-        cmd_append(&cmd, "-fconstant-cfstrings");
-    }
-#ifdef __APPLE__
-    if (config.platform == PLATFORM_NATIVE) cmd_append(&cmd, "-mmacosx-version-min="MACOS_TARGET);
-#endif
-}
-
-void append_renderer_libraries(void) {
-#ifdef __linux__
-    Nob_String_Builder sb = {0};
-    sb_append_cstr(&sb, "-Wl,--whole-archive,");
-    sb_append_cstr(&sb, SDL_FILE);
-    sb_append_null(&sb);
-    cmd_append(&cmd, sb.items);
-    cmd_append(&cmd, "-Wl,--no-whole-archive");
-#else
-    cmd_append(&cmd, temp_sprintf("-Wl,-force_load,%s", SDL_FILE));
-#endif
-}
-
-void append_includes(void) {
-    cmd_append(&cmd, "-isystem", "include");
-    cmd_append(&cmd, SDL_INCLUDE);
 }
 
 #define SDL_JAVA_SRC SDL_PATH"/android-project/app/src/main/java/org/libsdl/app"
@@ -665,7 +664,7 @@ bool build_app_ios(void) {
     char *sdl_ios_file = temp_sprintf(BUILD_FOLDER"/libsdl3_%s.a", platform);
 
     cmd_append(&cmd, "xcrun", "--sdk", platform, "--show-sdk-path");
-    char *ios_sdk_path = run_cmd_get_stdout(&cmd);
+    char *ios_sdk_path = run_cmd_get_stdout();
 
     // compile main.c
     char *arch = "arm64";
@@ -751,6 +750,8 @@ bool build_app_ios(void) {
     return true;
 }
 
+// Main
+
 bool build_app_native(void) {
     app_compiler();
     app_default_cmd();
@@ -763,8 +764,6 @@ bool build_app_native(void) {
     if (!cmd_run(&cmd)) return false;
     return true;
 }
-
-// Main
 
 bool build_clean_all(int argc, char **argv) {
     (void)argc; (void)argv;
@@ -806,11 +805,7 @@ bool build_app_config(Config config) {
     da_append(&app_inputs, "nob.c");
     recursively_collect_files(SRC, &app_inputs, allow_c_files);
 
-    printf("\n");
-    unsigned long long end = get_timestamp_usec();
-    nob_log(NOB_INFO, "Took %0.4fs.", (float)(end - start) / 1000000.0f);
-
-    // Run the app
+    // Build the app
     switch (config.platform) {
         case PLATFORM_NATIVE: {
             bool files_changed = needs_rebuild(EXE_NAME, app_inputs.items, app_inputs.count) == 1;
@@ -858,6 +853,13 @@ bool build_app_config(Config config) {
             if (!build_app_ios()) return false;
         } break;
     }
+
+    // TODO: run is missing
+    // TODO: copy parallelized ios building code from player
+
+    printf("\n");
+    unsigned long long end = get_timestamp_usec();
+    nob_log(NOB_INFO, "Took %0.4fs.", (float)(end - start) / 1000000.0f);
 
     dump_config_to_file(CONFIG_FILE_PATH, config);
 
