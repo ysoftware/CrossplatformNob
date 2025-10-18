@@ -1,16 +1,15 @@
 Build setup for crossplatform SDL-based application
 
+This is an example for building and running any app or game for all platform in C based on SDL3.
+Includes files and a build script to get SDL running on these platforms.
+Renders a red square on a black background when launched.
+
 Platforms support:
 - Linux
 - macOS
 - Windows (needs testing)
-- Android (crosscompilation)
+- Android
 - iOS (compiled from macOS)
-
-Dependencies:
-- SDL-3.1.26 included in the project
-- Android Studio -- expand on which executables exactly
-- Xcode
 
 Bootstrap build system
 ```bash
@@ -20,19 +19,17 @@ cc nob.c -o nob
 Usage and build programme:
 
 1. Native:
+- clang or gcc
 
 2. iOS
+- Xcode: xcrun, PlistBuddy, ibtool, security, codesign, devicectl, simctl
 
 3. Android
-- Java 17
+- Java 17 (not higher)
 - Android SDK
-- Android NDK
+- Android NDK: javac, jar, d8, aapt2, zip, zipalign, apksigner
+- ADB
 
 TODO:
 - Think if I should move env to an env.h or directly into nob.c
 - Test on Windows
-- Test for Android Device
-- Put all env in 1 file 
-- Mention build times for mobile platforms and how nice it is compared to default garbage tools
-- Include Xcode macOS project for debugging
-- Include step of building and using objc code 

@@ -1,13 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.ysoftware.Player"
+    package="com.developer.CrossplatformNob"
     android:versionCode="1"
     android:versionName="1.0">
 
   <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="34" />
 
-  <application android:label="Player" android:hasCode="true">
+  <application android:label="CrossplatformNob" android:hasCode="true">
     <activity android:name="com.ysoftware.MainActivity"
-              android:label="Player"
+              android:label="CrossplatformNob"
               android:exported="true">
       <intent-filter>
         <action android:name="android.intent.action.MAIN"/>

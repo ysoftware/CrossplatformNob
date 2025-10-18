@@ -40,9 +40,12 @@ Config config = {0};
 Env env = {0};
 Nob_Cmd cmd = {0};
 
-#define BUILD_FOLDER "build"
-#define SRC          "src"
-#define EXE_NAME     "main.app"
+// Don't forget to adjust these also in ios/Info.plist and AndroidManifest.xml
+#define EXE_NAME         "main.app"
+#define APP_ID           "com.developer.CrossplatformNob"
+
+#define BUILD_FOLDER     "build"
+#define SRC              "src"
 #define CONFIG_FILE_PATH BUILD_FOLDER"/.config"
 
 #define MACOS_TARGET      "11.0"
@@ -531,6 +534,7 @@ void append_includes(void) {
 
 #define SDL_JAVA_SRC SDL_PATH"/android-project/app/src/main/java/org/libsdl/app"
 #define ANDROID_BUILD BUILD_FOLDER"/android"
+#define ANDROID_APP   ANDROID_BUILD"/app.apk"
 bool build_app_android(void) {
     if (env.android_ndk_location.count == 0) { nob_log(NOB_ERROR, "env ANDROID_NDK_LOCATION not set"); return 1; }
     if (env.android_sdk_location.count == 0) { nob_log(NOB_ERROR, "env ANDROID_SDK_LOCATION not set"); return 1; }
@@ -651,15 +655,15 @@ bool build_app_android(void) {
     cmd_append(&cmd, "--ks", ANDROID_KEYSTORE_FILE);
     cmd_append(&cmd, "--ks-pass", "pass:android");
     cmd_append(&cmd, "--key-pass", "pass:android");
-    cmd_append(&cmd, "--out", ANDROID_BUILD"/app.apk");
+    cmd_append(&cmd, "--out", ANDROID_APP);
     cmd_append(&cmd, ANDROID_BUILD"/app-aligned.apk");
     if (!cmd_run(&cmd)) return false;
 
     return true;
 }
 
-#define IOS_BUILD BUILD_FOLDER"/ios"
-#define IOS_APP_BUNDLE IOS_BUILD"/Player.app"
+#define IOS_BUILD      BUILD_FOLDER"/ios"
+#define IOS_APP_BUNDLE IOS_BUILD"/App.app"
 bool build_app_ios(void) {
     char *platform = config.device ? "iphoneos" : "iphonesimulator";
     char *sdl_ios_file = temp_sprintf(BUILD_FOLDER"/libsdl3_%s.a", platform);
@@ -677,10 +681,9 @@ bool build_app_ios(void) {
     cmd_append(&cmd, "-DOS_IOS");
     cmd_append(&cmd, SRC"/main.c");
     cmd_append(&cmd, sdl_ios_file);
-
     append_frameworks();
     cmd_append(&cmd, "-ObjC");
-    cmd_append(&cmd, "-o", IOS_APP_BUNDLE"/Player");
+    cmd_append(&cmd, "-o", IOS_APP_BUNDLE"/"EXE_NAME);
     if (!cmd_run(&cmd)) return false;
 
     // compile launch screen nib
@@ -713,7 +716,7 @@ bool build_app_ios(void) {
         if (!copy_file("env/profile.mobileprovision", IOS_APP_BUNDLE"/embedded.mobileprovision")) return false;
 
         // get security data out of the file
-        cmd_append(&cmd, "security", "cms", "-D", "-i", "build/ios/Player.app/embedded.mobileprovision");
+        cmd_append(&cmd, "security", "cms", "-D", "-i", (IOS_APP_BUNDLE"/embedded.mobileprovision"));
         Nob_Fd profile_file = fd_open_for_write(BUILD_FOLDER"/ios/profile.plist");
         cmd_run(&cmd, .fdout = &profile_file);
 
@@ -744,7 +747,7 @@ bool build_app_ios(void) {
         cmd_append(&cmd, "codesign", "--force", "--sign", developer_name_sb.items);
         cmd_append(&cmd, "--preserve-metadata=identifier,entitlements");
         cmd_append(&cmd, "--entitlements", BUILD_FOLDER"/ios/entitlements.plist");
-        cmd_append(&cmd, IOS_APP_BUNDLE"/Player");
+        cmd_append(&cmd, IOS_APP_BUNDLE"/"EXE_NAME);
         cmd_run(&cmd);
     }
 
@@ -780,7 +783,7 @@ bool build_clean_all(int argc, char **argv) {
     return true;
 }
 
-bool build_app_config(Config config) {
+bool build_app(Config config) {
     unsigned long long start = get_timestamp_usec();
 
     bool config_did_change = false;
@@ -864,27 +867,54 @@ bool build_app_config(Config config) {
     return true;
 }
 
-bool build_app_all_configs(void) {
-    if (!build_app_config((Config) {
-        .platform = PLATFORM_NATIVE,
-        .force_rebuild = true,
-    })) return 1;
+bool run_app(Config config) {
+    switch (config.platform) {
+        case ANDROID: {
+            cmd_append(&cmd, "adb", "devices");
+            if (!cmd_run(&cmd)) return false;
 
-    if (!build_app_config((Config) {
-        .platform = ANDROID,
-    })) return 1;
+            cmd_append(&cmd, "adb", "install", "-r", ANDROID_APP);
+            if (!cmd_run(&cmd)) return false;
 
-#ifdef __APPLE__
-    if (!build_app_config((Config) {
-        .platform = IOS,
-    })) return 1;
+            cmd_append(&cmd, "adb", "shell", "monkey", "-p", APP_ID, "1");
+            if (!cmd_run(&cmd)) return false;
+        } break;
 
-    if (!build_app_config((Config) {
-        .platform = IOS,
-        .device = true
-    })) return 1;
-#endif
+        case IOS: {
+            if (config.device) {
+                if (env.ios_device_id.count == 0) {
+                    cmd_append(&cmd, "xcrun", "devicectl", "list", "devices");
+                    cmd_run(&cmd);
+                    nob_log(NOB_ERROR, "Please put the Identifier of the desired device, on which you want to run the app, into file env. See env.example for details.");
+                    return false;
+                }
 
+                cmd_append(&cmd, "xcrun", "devicectl", "device", "install");
+                cmd_append(&cmd, "app", "build/ios/App.app");
+                cmd_append(&cmd, "--device", temp_sprintf(SV_Fmt, SV_Arg(env.ios_device_id)));
+                cmd_run(&cmd);
+
+                cmd_append(&cmd, "xcrun", "devicectl", "device");
+                cmd_append(&cmd, "process", "launch");
+                cmd_append(&cmd, "--device", temp_sprintf(SV_Fmt, SV_Arg(env.ios_device_id)));
+                cmd_append(&cmd, );
+                cmd_run(&cmd);
+            } else {
+                nob_log(NOB_INFO, "Running the app on a booted simulator.");
+                cmd_append(&cmd, "xcrun", "simctl", "terminate", "booted", APP_ID);
+                cmd_run(&cmd);
+                cmd_append(&cmd, "xcrun", "simctl", "install", "booted", (IOS_APP_BUNDLE));
+                if (!cmd_run(&cmd)) return false;
+                cmd_append(&cmd, "xcrun", "simctl", "launch", "booted", APP_ID);
+                if (!cmd_run(&cmd)) return false;
+            }
+        } break;
+
+        default: {
+            cmd_append(&cmd, "./"EXE_NAME);
+            if (!cmd_run(&cmd)) return false;
+        } break;
+    }
     return true;
 }
 
@@ -897,13 +927,10 @@ int main(int argc, char **argv) {
 
     if (*(argv) != NULL && strcmp(*(argv), "clean") == 0) {
         if (!build_clean_all(argc, argv) != 0) return 1;
-    } else if (*(argv) != NULL && strcmp(*(argv), "sdl") == 0) {
-        if (!build_sdl(true) != 0) return 1;
-    } else if (*(argv) != NULL && strcmp(*(argv), "test_builds") == 0) {
-        if (!build_app_all_configs()) return 1;
     } else {
         if (!parse_config_from_args(&argc, &argv, &config)) return false;
-        if (!build_app_config(config)) return 1;
+        if (!build_app(config)) return 1;
+        if (config.should_run) if (!run_app(config)) return 1;
     }
 
     return 0;

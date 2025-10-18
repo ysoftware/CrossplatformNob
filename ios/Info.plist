@@ -4,16 +4,16 @@
 <plist version="1.0">
   <dict>
     <key>CFBundleName</key>
-    <string>Player</string>
+    <string>CrossplatformNob</string>
 
     <key>CFBundleDisplayName</key>
-    <string>Player</string>
+    <string>CrossplatformNob</string>
 
     <key>CFBundleIdentifier</key>
-    <string>com.ysoftware.Player</string>
+    <string>com.developer.CrossplatformNob</string>
 
     <key>CFBundleExecutable</key>
-    <string>Player</string>
+    <string>main.app</string>
 
     <key>CFBundleVersion</key>
     <string>1</string>
